@@ -1,10 +1,16 @@
 #!/usr/bin/python3
 # import pickle
+import datetime
 from pathlib import Path
 import numpy as np
 import re
 from itertools import combinations
 import gc
+import subprocess
+import shlex
+
+heavy_method = True
+save_dir = 'data'
 
 class UnstruncturedVTK(object):
     def __init__(self, fname=None):
@@ -69,10 +75,17 @@ class UnstruncturedVTK(object):
 
 class Grid(object):
     def __init__(self, fname=None):
+        def compile_helper():
+            cmd = f"ifort -fast src/grid_ope_helper.f90 -o bin/grid_ope_helper"
+            completed_process = subprocess.run(shlex.split(cmd),
+                                               stdout=subprocess.PIPE,
+                                               stderr=subprocess.PIPE)
+            return completed_process.returncode
+
         if not type(fname) is type('string'):
             raise ValueError("please input vtk file name")
 
-        outfile = Path(f'{fname}.pkl')
+        outfile = Path(f'{save_dir}/{fname}.pkl')
 
         if outfile.exists():
             print(f'pickle {outfile} find')
@@ -88,9 +101,9 @@ class Grid(object):
             face_per_cell = cells.shape[1]
 
             # create face object from cell
-            file_faces = Path(f'{fname}_faces.npy')
-            file_face2cell = Path(f'{fname}_face2cell.npy')
-            file_cell2face = Path(f'{fname}_cell2face.npy')
+            file_faces = Path(f'{save_dir}/{fname}_faces.npy')
+            file_face2cell = Path(f'{save_dir}/{fname}_face2cell.npy')
+            file_cell2face = Path(f'{save_dir}/{fname}_cell2face.npy')
             if file_faces.exists() and file_face2cell.exists() and file_cell2face.exists():
                 faces = np.load(str(file_faces))
                 face2cell = np.load(str(file_face2cell))
@@ -106,36 +119,63 @@ class Grid(object):
                 for cell_id, cell in enumerate(cells):
                     for face in combinations(cell, 3):
                         tmp_face2cell[face_id] = cell_id
+                        tmp_face2cell[face_id] = cell_id
                         tmp_cell2face[cell_id, face_id % face_per_cell] = face_id
                         tmp_faces[face_id] = sorted(face)
                         face_id += 1
 
                 # remove overlap
-                file_re_numbering_face = Path(f'{fname}_re_numbering_face.npy')
+                file_re_numbering_face = Path(f'{save_dir}/{fname}_re_numbering_face.txt')
                 if file_re_numbering_face.exists():
-                    re_numbering_face = np.load(str(file_re_numbering_face))
+                    re_numbering_face = np.loadtxt(str(file_re_numbering_face), dtype=int)
                     num_faces = np.unique(re_numbering_face).shape[0]
                 else:
-                    re_numbering_face = np.full(shape=(tmp_num_faces, 1), fill_value=-1, dtype=int)
-                    new_face_id = 0
-                    for face_id1, face1 in enumerate(tmp_faces):
-                        if re_numbering_face[face_id1] != -1:
-                            continue
+                    file_tmp_faces = Path(f'{save_dir}/tmp_faces.txt')
+                    np.savetxt(file_tmp_faces, tmp_faces, fmt=f'%{len(str(tmp_num_faces))}i')
 
-                        re_numbering_face[face_id1] = new_face_id
-                        for face_id2, face2 in enumerate(tmp_faces):
-                            # bubble
-                            if face_id1 >= face_id2:
+                    file_helper_bin = Path('bin/grid_ope_helper')
+                    if not file_helper_bin.exists():
+                        compile_helper()
+
+                    cmd = f"./bin/grid_ope_helper --re_numbering_face {tmp_num_faces} {file_tmp_faces} {fname}"
+                    completed_process = subprocess.run(shlex.split(cmd),
+                                                       stdout=subprocess.DEVNULL,
+                                                       stderr=subprocess.PIPE)
+
+                    if completed_process.returncode != 0:
+                        print(completed_process.stderr)
+                        exit(1)
+
+                    if file_re_numbering_face.exists():
+                        re_numbering_face = np.loadtxt(str(file_re_numbering_face), dtype=int)
+                        num_faces = np.unique(re_numbering_face).shape[0]
+                    else:
+                        print(f'Error: {str(file_re_numbering_face)} is not found.')
+                        print(f'please check {cmd}')
+                        raise ValueError
+
+                    if not heavy_method:
+                        re_numbering_face = np.full(shape=(tmp_num_faces, 1), fill_value=-1, dtype=int)
+                        new_face_id = 0
+                        for face_id1, face1 in enumerate(tmp_faces):
+
+                            if re_numbering_face[face_id1] != -1:
                                 continue
 
-                            # if same face
-                            if np.all(face1 == face2):
-                                re_numbering_face[face_id2] = new_face_id
+                            re_numbering_face[face_id1] = new_face_id
+                            for face_id2, face2 in enumerate(tmp_faces):
+                                # bubble
+                                if face_id1 >= face_id2:
+                                    continue
 
-                        new_face_id += 1
+                                # if same face
+                                if np.all(face1 == face2):
+                                    re_numbering_face[face_id2] = new_face_id
 
-                    np.save(str(file_re_numbering_face), re_numbering_face)
-                    num_faces = new_face_id
+                            new_face_id += 1
+
+                        np.save(str(file_re_numbering_face), re_numbering_face)
+                        num_faces = new_face_id
 
                 # regist face
                 faces = np.zeros(shape=(num_faces, 3))
@@ -170,9 +210,9 @@ class Grid(object):
                 gc.collect()
 
             # create line object from face
-            file_lines = Path(f'{fname}_lines.npy')
-            file_line2face = Path(f'{fname}_line2face.npy')
-            file_face2line = Path(f'{fname}_face2line.npy')
+            file_lines = Path(f'{save_dir}/{fname}_lines.npy')
+            file_line2face = Path(f'{save_dir}/{fname}_line2face.npy')
+            file_face2line = Path(f'{save_dir}/{fname}_face2line.npy')
             if file_lines.exists() and file_line2face.exists() and file_face2line.exists():
                 lines = np.load(str(file_lines))
                 line2face = np.load(str(file_line2face))
@@ -194,32 +234,59 @@ class Grid(object):
                         line_id += 1
 
                 # remove overlap
-                file_re_numbering_line = Path(f'{fname}_re_numbering_line.npy')
+                file_re_numbering_line = Path(f'{save_dir}/{fname}_re_numbering_line.txt')
                 if file_re_numbering_line.exists():
-                    re_numbering_line = np.load(str(file_re_numbering_line))
+                    re_numbering_line = np.loadtxt(str(file_re_numbering_line), dtype=int)
                     num_lines = np.unique(re_numbering_line).shape[0]
 
                 else:
-                    re_numbering_line = np.full(shape=(tmp_num_lines, 1), fill_value=-1, dtype=int)
-                    new_line_id = 0
-                    for line_id1, line1 in enumerate(tmp_lines):
-                        if re_numbering_line[line_id1] != -1:
-                            continue
 
-                        re_numbering_line[line_id1] = new_line_id
-                        for line_id2, line2 in enumerate(tmp_lines):
-                            # bubble
-                            if line_id1 >= line_id2:
+                    file_tmp_lines = Path(f'{save_dir}/tmp_lines.txt')
+                    np.savetxt(file_tmp_lines, tmp_lines, fmt=f'%{len(str(tmp_num_lines))}i')
+
+                    file_helper_bin = Path('bin/grid_ope_helper')
+                    if not file_helper_bin.exists():
+                        compile_helper()
+
+                    cmd = f"./bin/grid_ope_helper --re_numbering_line {tmp_num_lines} {file_tmp_lines} {fname}"
+                    completed_process = subprocess.run(shlex.split(cmd),
+                                                       stdout=subprocess.DEVNULL,
+                                                       stderr=subprocess.PIPE)
+
+                    if completed_process.returncode != 0:
+                        print(completed_process.stderr)
+                        exit(1)
+
+                    if file_re_numbering_line.exists():
+                        re_numbering_line = np.loadtxt(str(file_re_numbering_line), dtype=int)
+                        num_lines = np.unique(re_numbering_line).shape[0]
+                    else:
+                        print(f'Error: {str(file_re_numbering_line)} is not found.')
+                        print(f'please check {cmd}')
+                        raise ValueError
+
+                    if heavy_method:
+                        re_numbering_line = np.full(shape=(tmp_num_lines, 1), fill_value=-1, dtype=int)
+                        new_line_id = 0
+                        for line_id1, line1 in enumerate(tmp_lines):
+                            if re_numbering_line[line_id1] != -1:
                                 continue
 
-                            # if same line (sorted)
-                            if np.all(line1 == line2):
-                                re_numbering_line[line_id2] = new_line_id
+                            re_numbering_line[line_id1] = new_line_id
+                            for line_id2, line2 in enumerate(tmp_lines):
+                                # bubble
+                                if line_id1 >= line_id2:
+                                    continue
 
-                        new_line_id += 1
+                                # if same line (sorted)
+                                if np.all(line1 == line2):
+                                    re_numbering_line[line_id2] = new_line_id
 
-                    np.save(str(file_re_numbering_line), re_numbering_line)
-                    num_lines = new_line_id
+                            new_line_id += 1
+                            print(line_id1, tmp_num_lines, datetime.datetime.today())
+
+                        np.save(str(file_re_numbering_line), re_numbering_line)
+                        num_lines = new_line_id
 
                 # regist line
                 lines = np.zeros(shape=(num_lines, 2))
@@ -252,27 +319,54 @@ class Grid(object):
                 gc.collect()
 
             # create cell 2 line object from face
-            file_cell2line = Path(f'{fname}_cell2line.npy')
+            file_cell2line = Path(f'{save_dir}/{fname}_cell2line.npy')
             if file_cell2line.exists():
                 cell2line = np.load(str(file_cell2line))
             else:
                 cell2line = np.zeros(shape=(num_cells, 6), dtype=int)
                 tmp_cell2line = np.zeros(shape=(12), dtype=int)
-                for cell_id, cell in enumerate(cells):
-                    for face_id_in_cell, face_id in enumerate(cell2face[cell_id]):
-                        line_id_in_cell = (face_id_in_cell + 1) * (face_id + 1)
-                        tmp_cell2line[line_id_in_cell] = face2line[face_id, face_id_in_cell]
+                for cell_id, cell in enumerate(cells):  # loop for all cell
+                    line_id_in_cell = 0
+                    for face_id_in_cell, face_id in enumerate(cell2face[cell_id]):  # loop for all face in cell
+                        for line_id_in_face, line_id in enumerate(face2line[face_id]):
+                            tmp_cell2line[line_id_in_cell] = line_id
+                            line_id_in_cell += 1
 
                     cell2line[cell_id] = np.unique(tmp_cell2line)
 
                 np.save(str(file_cell2line), cell2line)
 
-            file_line2cell = Path(f'{fname}_line2cell.npy')
+                del tmp_cell2line
+                gc.collect()
+
+            file_line2cell = Path(f'{save_dir}/{fname}_line2cell.npy')
             if file_line2cell.exists():
                 line2cell = np.load(str(file_line2cell))
             else:
-                pass
+                tmp_line_structure_histgram = np.zeros(shape=(num_lines), dtype=int)
+                for cell_id in range(num_cells):
+                    for line_id in cell2line[cell_id]:
+                        tmp_line_structure_histgram[line_id] += 1
+
+                max_link_number = np.max(tmp_line_structure_histgram)
+                line2cell = np.full(shape=(num_lines, max_link_number), fill_value=-1, dtype=int)
+                tmp_link_number = np.zeros(shape=(num_lines), dtype=int)
+                for cell_id in range(num_cells):
+                    for line_id in cell2line[cell_id]:
+                        link_id = tmp_link_number[line_id]
+                        line2cell[line_id, link_id] = cell_id
+                        tmp_link_number[line_id] += 1
+
+                np.save(str(file_line2cell), line2cell)
+
+                del tmp_line_structure_histgram, tmp_link_number
+                gc.collect()
+
             # save to pickle
+
+    def cell2line(self, cell_id, line_id_in_cell):
+        return self.cell2line(cell_id, lineidin
+                              )
 
 
 # Press the green button in the gutter to run the script.
